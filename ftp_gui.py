@@ -1,28 +1,28 @@
-import sys
-import os
-import socket
 import configparser
 import logging
-from PyQt5.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, 
-                             QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit, 
-                             QFormLayout, QSpinBox, QFileDialog, QSystemTrayIcon, QMenu, QAction, QCheckBox)
-from PyQt5.QtCore import QThread, pyqtSignal, Qt
-from PyQt5.QtGui import QIcon
+import os
+import socket
+import sys
+import ctypes as ct
+
+import darkdetect
+import qdarktheme
+from PySide6.QtCore import QThread, Signal
+from PySide6.QtGui import QIcon, QAction
+from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
+                               QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
+                               QFormLayout, QSpinBox, QFileDialog, QSystemTrayIcon, QMenu, QCheckBox)
 from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
-# requirements:
-# python.exe -m pip install pyftpdlib PyQt5
-# compiling and dependancies:
-# python.exe -m pip install pyinstaller Pillow 
-# pyinstaller --onefile --windowed --add-data "ftp.png;." --icon=ftp.png ftp_gui.py
 
-# this file will be created where the code is run from or in folder where .exe is
-# it gives options to save settings
-CONFIG_FILE = "ftp-config.cfg"
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE_NAME = "ftp_config.cfg"
+CONFIG_FILE = os.path.join(BASE_PATH, CONFIG_FILE_NAME)
+
 
 class FTPServerThread(QThread):
-    log_signal = pyqtSignal(str)
+    log_signal = Signal(str)
 
     def __init__(self, port, username, password, ftp_directory, log_file, parent=None):
         super(FTPServerThread, self).__init__(parent)
@@ -36,11 +36,8 @@ class FTPServerThread(QThread):
         self.setup_logger()
 
     def setup_logger(self):
-        """Setup logger to log both to file and emit to GUI."""
         self.logger = logging.getLogger("FTPServer")
         self.logger.setLevel(logging.INFO)
-
-        # Create file handler
         file_handler = logging.FileHandler(self.log_file)
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         self.logger.addHandler(file_handler)
@@ -49,24 +46,18 @@ class FTPServerThread(QThread):
         if not os.path.exists(self.ftp_directory):
             os.makedirs(self.ftp_directory)
 
-        # Set up authorizer with user authentication
         authorizer = DummyAuthorizer()
         authorizer.add_user(self.username, self.password, self.ftp_directory, perm="elradfmw")
 
-        # Set up FTP handler
         handler = FTPHandler
         handler.authorizer = authorizer
-
-        # Override handler log method to connect to the log signal and file logger
         handler.log = self.log
 
-        # Create FTP server
         self.server = FTPServer(("0.0.0.0", self.port), handler)
         self.running = True
         self.server.serve_forever()
 
     def log(self, message, logfun=None):
-        """Custom log method to emit logs to the GUI and log to the file."""
         self.log_signal.emit(message)
         self.logger.info(message)
 
@@ -91,15 +82,12 @@ class FTPGuiApp(QWidget):
         self.tray_icon = None
         self.init_ui()
 
-        # Start in daemon mode if configured
         if self.run_as_daemon:
             self.start_server()
             self.hide_to_tray()
 
     def init_ui(self):
         layout = QVBoxLayout()
-
-        # Form for user, password, port, and directory
         form_layout = QFormLayout()
 
         self.username_input = QLineEdit()
@@ -107,6 +95,8 @@ class FTPGuiApp(QWidget):
         self.password_input = QLineEdit()
         self.password_input.setEchoMode(QLineEdit.Password)
         self.password_input.setText(self.password)
+        self.password_input.installEventFilter(self)
+
         self.port_input = QSpinBox()
         self.port_input.setRange(1, 65535)
         self.port_input.setValue(self.port)
@@ -115,7 +105,6 @@ class FTPGuiApp(QWidget):
         form_layout.addRow("Password:", self.password_input)
         form_layout.addRow("Port:", self.port_input)
 
-        # FTP directory picker
         self.directory_input = QLineEdit()
         self.directory_input.setText(self.ftp_directory)
         self.directory_button = QPushButton("Browse FTP Folder")
@@ -128,7 +117,6 @@ class FTPGuiApp(QWidget):
         layout.addLayout(form_layout)
         layout.addLayout(directory_layout)
 
-        # Log file path picker
         self.log_file_input = QLineEdit()
         self.log_file_input.setText(self.log_file)
         self.log_file_button = QPushButton("Browse Log File")
@@ -140,46 +128,51 @@ class FTPGuiApp(QWidget):
 
         layout.addLayout(log_layout)
 
-        # Daemon mode checkbox
-        self.daemon_checkbox = QCheckBox("Run as Daemon (Minimize to Tray)")
+        self.daemon_checkbox = QCheckBox("Minimize to Tray after closing")
         self.daemon_checkbox.setChecked(self.run_as_daemon)
         layout.addWidget(self.daemon_checkbox)
 
-        # Button to start and stop the server
         self.start_button = QPushButton("Start FTP Server")
         self.start_button.clicked.connect(self.start_server)
         self.stop_button = QPushButton("Stop FTP Server")
         self.stop_button.clicked.connect(self.stop_server)
         self.stop_button.setEnabled(False)
 
-        # Layout for buttons
         button_layout = QHBoxLayout()
         button_layout.addWidget(self.start_button)
         button_layout.addWidget(self.stop_button)
-
         layout.addLayout(button_layout)
 
-        # Log view to show server activity
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         layout.addWidget(self.log_view)
 
-        # Label to show listening IP addresses
         self.ip_label = QLabel("Listening on:")
         layout.addWidget(self.ip_label)
 
         self.setLayout(layout)
-
-        # Set up system tray for daemon mode
         self.setup_tray_icon()
 
+    def eventFilter(self, obj, event):
+        if obj == self.password_input:
+            if event.type() == event.Type.FocusIn:
+                self.password_input.setEchoMode(QLineEdit.Normal)
+            elif event.type() == event.Type.FocusOut:
+                self.password_input.setEchoMode(QLineEdit.Password)
+        return super().eventFilter(obj, event)
+
+    def adjust_window_size(self, dx, dy):
+        current_geometry = self.geometry()
+        new_width = current_geometry.width() + dx
+        new_height = current_geometry.height() + dy
+        self.setGeometry(current_geometry.x(), current_geometry.y(), new_width, new_height)
+
     def setup_tray_icon(self):
-        icon_path = os.path.join(os.path.dirname(__file__), 'ftp.png')
+        icon_path = os.path.join(BASE_PATH, 'ftp.png')
         self.tray_icon = QSystemTrayIcon(self)
         self.tray_icon.setIcon(QIcon(icon_path))
 
         tray_menu = QMenu()
-
         restore_action = QAction("Restore", self)
         restore_action.triggered.connect(self.show)
         tray_menu.addAction(restore_action)
@@ -193,7 +186,7 @@ class FTPGuiApp(QWidget):
         self.tray_icon.show()
 
     def on_tray_icon_activated(self, reason):
-        if reason == QSystemTrayIcon.Trigger:
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
             self.show()
 
     def hide_to_tray(self):
@@ -230,6 +223,16 @@ class FTPGuiApp(QWidget):
         if self.daemon_checkbox.isChecked():
             self.hide_to_tray()
 
+        config['FTP'] = {
+            'username': username,
+            'password': password,
+            'port': f'{port}',
+            'ftp_directory': fr'{ftp_directory}',
+            'run_as_daemon': '1' if self.daemon_checkbox.isChecked() else '0',
+            'log_file': fr'{log_file}'
+        }
+        save_config(config)
+
     def stop_server(self):
         if self.server_thread:
             self.server_thread.stop()
@@ -263,11 +266,10 @@ class FTPGuiApp(QWidget):
 def load_config():
     config = configparser.ConfigParser()
     if not os.path.exists(CONFIG_FILE):
-        # Default settings for first run
         config['FTP'] = {
-            'username': 'user',
-            'password': '123',
-            'port': '21',
+            'username': 'ftp_user',
+            'password': 'very_safe@2025',
+            'port': '33921',
             'ftp_directory': r'C:\Temp\FTP',
             'run_as_daemon': '0',
             'log_file': 'ftp_log.txt'
@@ -279,14 +281,34 @@ def load_config():
     return config
 
 
+def save_config(config):
+    with open(CONFIG_FILE, 'w') as configfile:
+        config.write(configfile)
+
+
+def dark_title_bar(hwnd, use_dark_mode=False):
+    DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+    set_window_attribute = ct.windll.dwmapi.DwmSetWindowAttribute
+    rendering_policy = DWMWA_USE_IMMERSIVE_DARK_MODE
+    value = 1 if use_dark_mode else 0
+    value = ct.c_int(value)
+    result = set_window_attribute(hwnd, rendering_policy, ct.byref(value), ct.sizeof(value))
+    if result != 0:
+        print(f"Failed to set dark mode: {result}")
+
+
 if __name__ == '__main__':
     config = load_config()
 
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon('./ftp.png'))
+    qdarktheme.setup_theme("auto")
     gui = FTPGuiApp(config)
-    
-    # Show the window if not in daemon mode
+
     if not config.getboolean('FTP', 'run_as_daemon'):
         gui.show()
+        winId = gui.winId()
+        dark_title_bar(winId, use_dark_mode=darkdetect.isDark())
+        gui.adjust_window_size(1, 1)  # to trigger dark refresh on screen
 
-    sys.exit(app.exec_())
+    sys.exit(app.exec())

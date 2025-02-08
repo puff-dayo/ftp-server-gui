@@ -1,6 +1,0 @@
-PyQt5
-pyftpdlib
-
-# for windows compiling:
-pyinstaller
-Pillow 
