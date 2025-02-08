@@ -6,6 +6,9 @@
 - It can run in background from launch if you set `run_as_daemon = 1` in `ftp_config.cfg`
 
 The [original repository](https://github.com/ghostersk/ftp-server-gui) is forked here with the intention of updating it to use the newer PySide6, making some improvements and adding new features. Additionally, this project has abandoned support for Linux and has not undergone security testing. Please do not expose it to any public network.
+
+![image](https://github.com/user-attachments/assets/4fba0521-b1b7-4c6a-b85e-623cab6f62e4)
+
 #### Default ftp config
 ```
 username: ftp_user
