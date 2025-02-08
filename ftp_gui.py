@@ -16,10 +16,12 @@ from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
-BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-ICON_PATH = os.path.join(BASE_PATH, 'ftp.png')
+EXE_PATH = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+TEMP_PATH = os.path.dirname(os.path.abspath(__file__))
+
+ICON_PATH = os.path.join(TEMP_PATH, 'ftp.png')
 CONFIG_FILE_NAME = "ftp_config.cfg"
-CONFIG_FILE = os.path.join(BASE_PATH, CONFIG_FILE_NAME)
+CONFIG_FILE = os.path.join(EXE_PATH, CONFIG_FILE_NAME)
 
 
 class FTPServerThread(QThread):
@@ -272,7 +274,7 @@ def load_config():
             'port': '33921',
             'ftp_directory': r'C:\Temp\FTP',
             'run_as_daemon': '0',
-            'log_file': 'ftp_log.txt'
+            'log_file': os.path.join(EXE_PATH, 'ftp_log.txt')
         }
         with open(CONFIG_FILE, 'w') as configfile:
             config.write(configfile)
