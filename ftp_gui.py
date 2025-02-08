@@ -17,6 +17,7 @@ from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
+ICON_PATH = os.path.join(BASE_PATH, 'ftp.png')
 CONFIG_FILE_NAME = "ftp_config.cfg"
 CONFIG_FILE = os.path.join(BASE_PATH, CONFIG_FILE_NAME)
 
@@ -168,9 +169,8 @@ class FTPGuiApp(QWidget):
         self.setGeometry(current_geometry.x(), current_geometry.y(), new_width, new_height)
 
     def setup_tray_icon(self):
-        icon_path = os.path.join(BASE_PATH, 'ftp.png')
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(QIcon(icon_path))
+        self.tray_icon.setIcon(QIcon(ICON_PATH))
 
         tray_menu = QMenu()
         restore_action = QAction("Restore", self)
@@ -301,7 +301,7 @@ if __name__ == '__main__':
     config = load_config()
 
     app = QApplication(sys.argv)
-    app.setWindowIcon(QIcon('./ftp.png'))
+    app.setWindowIcon(QIcon(ICON_PATH))
     qdarktheme.setup_theme("auto")
     gui = FTPGuiApp(config)
 
