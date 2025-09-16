@@ -1,9 +1,12 @@
 import configparser
+import ctypes as ct
+import ipaddress
 import logging
 import os
+import secrets
 import socket
+import string
 import sys
-import ctypes as ct
 
 import darkdetect
 import qdarktheme
@@ -16,7 +19,9 @@ from pyftpdlib.authorizers import DummyAuthorizer
 from pyftpdlib.handlers import FTPHandler
 from pyftpdlib.servers import FTPServer
 
-EXE_PATH = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+# EXE_PATH = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(
+#     os.path.abspath(__file__))
+EXE_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 TEMP_PATH = os.path.dirname(os.path.abspath(__file__))
 
 ICON_PATH = os.path.join(TEMP_PATH, 'ftp.png')
@@ -24,16 +29,145 @@ CONFIG_FILE_NAME = "ftp_config.cfg"
 CONFIG_FILE = os.path.join(EXE_PATH, CONFIG_FILE_NAME)
 
 
+def choose_bind_ip(preferred_nets=None):
+    def in_any(ip, nets):
+        return any(ip in n for n in nets) if nets else False
+
+    RFC1918 = [ipaddress.ip_network(n) for n in ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')]
+    AVOID = [ipaddress.ip_network(n) for n in ('198.18.0.0/15', '169.254.0.0/16')]
+
+    candidates = []
+
+    try:
+        for ip in socket.gethostbyname_ex(socket.gethostname())[2]:
+            try:
+                a = ipaddress.ip_address(ip)
+                if not a.is_loopback and not a.is_link_local:
+                    candidates.append(a)
+            except ValueError:
+                pass
+    except Exception:
+        pass
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        a = ipaddress.ip_address(ip)
+        if not a.is_loopback and not a.is_link_local and a not in candidates:
+            candidates.append(a)
+    except Exception:
+        pass
+
+    picks = []
+    if preferred_nets:
+        picks.append(lambda a: in_any(a, preferred_nets) and in_any(a, RFC1918))
+        picks.append(lambda a: in_any(a, preferred_nets) and not in_any(a, AVOID))
+
+    picks.append(lambda a: in_any(a, RFC1918))
+    picks.append(lambda a: a.is_private and not in_any(a, AVOID))
+    picks.append(lambda a: a.is_private)
+
+    for cond in picks:
+        for a in candidates:
+            if cond(a):
+                return str(a)
+    return None
+
+
+def generate_username(prefix="ftp"):
+    return f"{prefix}_{secrets.token_hex(4)}"
+
+
+def generate_password(length=24):
+    alphabet = string.ascii_letters + string.digits + "-_@#%"
+    while True:
+        pwd = ''.join(secrets.choice(alphabet) for _ in range(length))
+        if (any(c.islower() for c in pwd) and any(c.isupper() for c in pwd)
+                and any(c.isdigit() for c in pwd) and any(c in "-_@#%" for c in pwd)):
+            return pwd
+
+
+def _port_free(port, host="0.0.0.0"):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def pick_random_port(preferred=(), low=20000, high=65535, attempts=100):
+    for p in preferred:
+        if _port_free(p):
+            return p
+
+    span = high - low + 1
+    tried = set()
+    for _ in range(min(attempts, span)):
+        p = secrets.randbelow(span) + low
+        if p in tried:
+            continue
+        tried.add(p)
+        if _port_free(p):
+            return p
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("0.0.0.0", 0))
+        p = s.getsockname()[1]
+        s.close()
+        return p
+    except Exception:
+        return 33921
+
+
+class LANFilteredFTPHandler(FTPHandler):
+    allowed_networks = None
+
+    def on_connect(self):
+        try:
+            ip = ipaddress.ip_address(self.remote_ip)
+        except ValueError:
+            if self.allowed_networks:
+                self.respond("421 Service not available, access denied.")
+                try:
+                    self.close()
+                finally:
+                    return
+            return super().on_connect()
+
+        nets = getattr(self, "allowed_networks", None)
+        if nets:
+            if not any(ip in n for n in nets):
+                if hasattr(self, "log"):
+                    self.log(f"Blocked connection from {ip} (not in allowed networks)")
+                self.respond("421 Service not available, access denied.")
+                try:
+                    self.close()
+                finally:
+                    return
+        return super().on_connect()
+
+
 class FTPServerThread(QThread):
     log_signal = Signal(str)
 
-    def __init__(self, port, username, password, ftp_directory, log_file, parent=None):
+    def __init__(self, port, username, password, ftp_directory, log_file,
+                 allow_lan_only=False, allowed_nets_text="auto",
+                 bind_host="auto", read_only=True, parent=None):
         super(FTPServerThread, self).__init__(parent)
         self.port = port
         self.username = username
         self.password = password
         self.ftp_directory = ftp_directory
         self.log_file = log_file
+        self.allow_lan_only = allow_lan_only
+        self.allowed_nets_text = (allowed_nets_text or "").strip()
+        self.bind_host = bind_host
+        self.read_only = read_only
         self.server = None
         self.running = False
         self.setup_logger()
@@ -45,18 +179,62 @@ class FTPServerThread(QThread):
         file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
         self.logger.addHandler(file_handler)
 
+    def _parse_allowed_networks(self):
+        if not self.allow_lan_only:
+            return None
+        txt = (self.allowed_nets_text or "").strip().lower()
+        auto = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+        cidrs = auto if txt in ("", "auto") else [p.strip() for p in txt.replace(";", ",").split(",") if p.strip()]
+        nets = []
+        for c in cidrs:
+            try:
+                nets.append(ipaddress.ip_network(c, strict=False))
+            except ValueError:
+                self.log(f"Invalid CIDR skipped: {c}")
+        if not nets:
+            raise ValueError("LAN-only is enabled but no valid CIDRs were provided.")
+        return nets
+
+    def _get_bind_addr(self, preferred_nets=None):
+        bh = (self.bind_host or "").strip().lower()
+        if bh in ("", "0.0.0.0", "all"):
+            if self.allow_lan_only:
+                raise ValueError("Refusing to bind 0.0.0.0 in LAN-only mode. Set a LAN IP explicitly.")
+            return "0.0.0.0"
+        if bh == "auto":
+            ip = choose_bind_ip(preferred_nets)
+            if not ip:
+                if self.allow_lan_only:
+                    raise ValueError("Could not determine a LAN IP in LAN-only mode.")
+                return "0.0.0.0"
+            return ip
+        return self.bind_host
+
     def run(self):
         if not os.path.exists(self.ftp_directory):
             os.makedirs(self.ftp_directory)
 
+        perms = "elr" if self.read_only else "elradfmw"
         authorizer = DummyAuthorizer()
-        authorizer.add_user(self.username, self.password, self.ftp_directory, perm="elradfmw")
+        authorizer.add_user(self.username, self.password, self.ftp_directory, perm=perms)
 
-        handler = FTPHandler
+        handler = LANFilteredFTPHandler
         handler.authorizer = authorizer
         handler.log = self.log
+        self.log(f"Read-only mode: {'ON' if self.read_only else 'OFF'}")
 
-        self.server = FTPServer(("0.0.0.0", self.port), handler)
+        nets = self._parse_allowed_networks()
+        handler.allowed_networks = nets
+
+        bind_addr = self._get_bind_addr(nets)
+        if handler.allowed_networks:
+            self.log(f"LAN-only filtering enabled; allowed nets = {handler.allowed_networks}")
+        self.log(f"Binding FTP server to {bind_addr}:{self.port}")
+
+        self.server = FTPServer((bind_addr, self.port), handler)
+        self.server.max_cons = 64
+        self.server.max_cons_per_ip = 5
+        handler.max_login_attempts = 3
         self.running = True
         self.server.serve_forever()
 
@@ -81,6 +259,10 @@ class FTPGuiApp(QWidget):
         self.username = config['FTP']['username']
         self.password = config['FTP']['password']
         self.port = config.getint('FTP', 'port')
+        self.allow_lan_only = config['FTP'].getboolean('allow_lan_only', True)
+        self.allowed_nets = config['FTP'].get('allowed_nets', 'auto')
+        self.bind_host = config['FTP'].get('bind_host', 'auto')
+        self.read_only = config['FTP'].getboolean('read_only', True)
 
         self.tray_icon = None
         self.init_ui()
@@ -134,6 +316,26 @@ class FTPGuiApp(QWidget):
         self.daemon_checkbox = QCheckBox("Minimize to Tray after closing")
         self.daemon_checkbox.setChecked(self.run_as_daemon)
         layout.addWidget(self.daemon_checkbox)
+
+        self.read_only_checkbox = QCheckBox("Read-only mode")
+        self.read_only_checkbox.setChecked(self.read_only)
+        layout.addWidget(self.read_only_checkbox)
+
+        self.lan_only_checkbox = QCheckBox("LAN only")
+        self.lan_only_checkbox.setChecked(self.allow_lan_only)
+        layout.addWidget(self.lan_only_checkbox)
+
+        self.allowed_nets_input = QLineEdit()
+        self.allowed_nets_input.setPlaceholderText("192.168.1.0/24")
+        self.allowed_nets_input.setText(self.allowed_nets)
+        form_layout2 = QFormLayout()
+        form_layout2.addRow("Allowed networks:", self.allowed_nets_input)
+        layout.addLayout(form_layout2)
+
+        self.bind_host_input = QLineEdit()
+        self.bind_host_input.setPlaceholderText("auto / 0.0.0.0 / <LAN IP>")
+        self.bind_host_input.setText(self.bind_host)
+        form_layout2.addRow("Bind host:", self.bind_host_input)
 
         self.start_button = QPushButton("Start FTP Server")
         self.start_button.clicked.connect(self.start_server)
@@ -213,8 +415,18 @@ class FTPGuiApp(QWidget):
         port = self.port_input.value()
         ftp_directory = self.directory_input.text()
         log_file = self.log_file_input.text()
+        allow_lan_only = self.lan_only_checkbox.isChecked()
+        allowed_nets_text = self.allowed_nets_input.text()
+        bind_host = self.bind_host_input.text().strip() or "auto"
+        read_only = self.read_only_checkbox.isChecked()
 
-        self.server_thread = FTPServerThread(port, username, password, ftp_directory, log_file)
+        self.server_thread = FTPServerThread(
+            port, username, password, ftp_directory, log_file,
+            allow_lan_only=allow_lan_only,
+            allowed_nets_text=allowed_nets_text,
+            bind_host=bind_host,
+            read_only=read_only
+        )
         self.server_thread.log_signal.connect(self.log_message)
         self.server_thread.start()
 
@@ -231,7 +443,11 @@ class FTPGuiApp(QWidget):
             'port': f'{port}',
             'ftp_directory': fr'{ftp_directory}',
             'run_as_daemon': '1' if self.daemon_checkbox.isChecked() else '0',
-            'log_file': fr'{log_file}'
+            'log_file': fr'{log_file}',
+            'allow_lan_only': '1' if allow_lan_only else '0',
+            'allowed_nets': allowed_nets_text or 'auto',
+            'bind_host': bind_host or 'auto',
+            'read_only': '1' if read_only else '0'
         }
         save_config(config)
 
@@ -267,14 +483,23 @@ class FTPGuiApp(QWidget):
 
 def load_config():
     config = configparser.ConfigParser()
+
     if not os.path.exists(CONFIG_FILE):
+        gen_user = generate_username()
+        gen_pass = generate_password()
+        gen_port = pick_random_port()
+
         config['FTP'] = {
-            'username': 'ftp_user',
-            'password': 'very_safe@2025',
-            'port': '33921',
+            'username': gen_user,
+            'password': gen_pass,
+            'port': f'{gen_port}',
             'ftp_directory': r'C:\Temp\FTP',
             'run_as_daemon': '0',
-            'log_file': os.path.join(EXE_PATH, 'ftp_log.txt')
+            'log_file': os.path.join(EXE_PATH, 'ftp_log.txt'),
+            'allow_lan_only': '1',
+            'allowed_nets': 'auto',
+            'bind_host': 'auto',
+            'read_only': '1'
         }
         with open(CONFIG_FILE, 'w') as configfile:
             config.write(configfile)
@@ -311,6 +536,6 @@ if __name__ == '__main__':
         gui.show()
         winId = gui.winId()
         dark_title_bar(winId, use_dark_mode=darkdetect.isDark())
-        gui.adjust_window_size(1, 1)  # to trigger dark refresh on screen
+        gui.adjust_window_size(1, 1)
 
     sys.exit(app.exec())

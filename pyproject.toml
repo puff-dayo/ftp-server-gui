@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Simple FTP server with GUI with python - with windows exe"
 requires-python = ">=3.12"
 dependencies = [
+    "imageio>=2.37.0",
+    "nuitka==2.7.14",
     "pillow>=11.1.0",
     "pyftpdlib>=2.0.1",
     "pyinstaller>=6.11.1",
