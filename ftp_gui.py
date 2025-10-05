@@ -11,11 +11,14 @@ import sys
 
 import darkdetect
 import qdarktheme
-from PySide6.QtCore import QThread, Signal
-from PySide6.QtGui import QIcon, QAction
-from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
-                               QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
-                               QFormLayout, QSpinBox, QFileDialog, QSystemTrayIcon, QMenu, QCheckBox)
+from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QIcon, QAction, QTextCursor
+from PySide6.QtWidgets import (
+    QApplication, QWidget, QLabel, QPushButton,
+    QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
+    QFormLayout, QSpinBox, QFileDialog, QSystemTrayIcon,
+    QMenu, QCheckBox, QSplitter, QSizePolicy, QFrame
+)
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
@@ -185,13 +188,14 @@ class FTPServerThread(QThread):
         self.running = False
         self.setup_logger()
 
-
     def setup_logger(self):
         self.logger = logging.getLogger("FTPServer")
         self.logger.setLevel(logging.INFO)
-        file_handler = logging.FileHandler(self.log_file)
-        file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
-        self.logger.addHandler(file_handler)
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == os.path.abspath(self.log_file)
+                   for h in self.logger.handlers):
+            file_handler = logging.FileHandler(self.log_file)
+            file_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+            self.logger.addHandler(file_handler)
 
     def _parse_allowed_networks(self):
         if not self.allow_lan_only:
@@ -266,7 +270,6 @@ class FTPServerThread(QThread):
         self.running = True
         self.server.serve_forever()
 
-
     def log(self, message, logfun=None):
         self.log_signal.emit(message)
         self.logger.info(message)
@@ -300,16 +303,30 @@ class FTPGuiApp(QWidget):
         self.cert_common_name = config['FTP'].get('cert_common_name', 'localhost')
 
         self.tray_icon = None
+        self.log_buffer = []
+
         self.init_ui()
+
+        self.resize(800, 532)
 
         if self.run_as_daemon:
             self.start_server()
             self.hide_to_tray()
 
     def init_ui(self):
-        layout = QVBoxLayout()
-        form_layout = QFormLayout()
+        # ===== LR Split =====
+        splitter = QSplitter(Qt.Horizontal)
+        left_panel = QWidget()
+        right_panel = QWidget()
+        splitter.addWidget(left_panel)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 2)
 
+        # ===== Left panel =====
+        left_layout = QVBoxLayout(left_panel)
+
+        form_layout = QFormLayout()
         self.username_input = QLineEdit()
         self.username_input.setText(self.username)
         self.password_input = QLineEdit()
@@ -324,66 +341,64 @@ class FTPGuiApp(QWidget):
         form_layout.addRow("Username:", self.username_input)
         form_layout.addRow("Password:", self.password_input)
         form_layout.addRow("Port:", self.port_input)
+        left_layout.addLayout(form_layout)
 
+        # FTP directory
         self.directory_input = QLineEdit()
         self.directory_input.setText(self.ftp_directory)
         self.directory_button = QPushButton("Browse FTP Folder")
         self.directory_button.clicked.connect(self.select_directory)
-
         directory_layout = QHBoxLayout()
         directory_layout.addWidget(self.directory_input)
         directory_layout.addWidget(self.directory_button)
+        left_layout.addLayout(directory_layout)
 
-        layout.addLayout(form_layout)
-        layout.addLayout(directory_layout)
-
+        # Log file
         self.log_file_input = QLineEdit()
         self.log_file_input.setText(self.log_file)
         self.log_file_button = QPushButton("Browse Log File")
         self.log_file_button.clicked.connect(self.select_log_file)
-
         log_layout = QHBoxLayout()
         log_layout.addWidget(self.log_file_input)
         log_layout.addWidget(self.log_file_button)
+        left_layout.addLayout(log_layout)
 
-        layout.addLayout(log_layout)
-
+        # Options..
         self.daemon_checkbox = QCheckBox("Minimize to Tray after closing")
         self.daemon_checkbox.setChecked(self.run_as_daemon)
-        layout.addWidget(self.daemon_checkbox)
+        left_layout.addWidget(self.daemon_checkbox)
 
         self.read_only_checkbox = QCheckBox("Read-only mode")
         self.read_only_checkbox.setChecked(self.read_only)
-        layout.addWidget(self.read_only_checkbox)
+        left_layout.addWidget(self.read_only_checkbox)
 
         self.lan_only_checkbox = QCheckBox("LAN only")
         self.lan_only_checkbox.setChecked(self.allow_lan_only)
-        layout.addWidget(self.lan_only_checkbox)
+        left_layout.addWidget(self.lan_only_checkbox)
 
+        nets_form = QFormLayout()
         self.allowed_nets_input = QLineEdit()
         self.allowed_nets_input.setPlaceholderText("192.168.1.0/24")
         self.allowed_nets_input.setText(self.allowed_nets)
-        form_layout2 = QFormLayout()
-        form_layout2.addRow("Allowed networks:", self.allowed_nets_input)
-        layout.addLayout(form_layout2)
+        nets_form.addRow("Allowed networks:", self.allowed_nets_input)
 
         self.bind_host_input = QLineEdit()
         self.bind_host_input.setPlaceholderText("auto / 0.0.0.0 / <LAN IP>")
         self.bind_host_input.setText(self.bind_host)
-        form_layout2.addRow("Bind host:", self.bind_host_input)
+        nets_form.addRow("Bind host:", self.bind_host_input)
+        left_layout.addLayout(nets_form)
 
-        # --- FTPS 区域 ---
         self.ftps_enable_checkbox = QCheckBox("Enable FTPS (TLS)")
         self.ftps_enable_checkbox.setChecked(self.ftps_enabled)
-        layout.addWidget(self.ftps_enable_checkbox)
+        left_layout.addWidget(self.ftps_enable_checkbox)
 
         self.tls_ctrl_checkbox = QCheckBox("Require TLS for control channel")
         self.tls_ctrl_checkbox.setChecked(self.tls_require_ctrl)
-        layout.addWidget(self.tls_ctrl_checkbox)
+        left_layout.addWidget(self.tls_ctrl_checkbox)
 
         self.tls_data_checkbox = QCheckBox("Require TLS for data channel")
         self.tls_data_checkbox.setChecked(self.tls_require_data)
-        layout.addWidget(self.tls_data_checkbox)
+        left_layout.addWidget(self.tls_data_checkbox)
 
         self.cert_file_input = QLineEdit()
         self.cert_file_input.setText(self.cert_file)
@@ -392,7 +407,7 @@ class FTPGuiApp(QWidget):
         cert_row = QHBoxLayout()
         cert_row.addWidget(self.cert_file_input)
         cert_row.addWidget(self.cert_browse_btn)
-        layout.addLayout(cert_row)
+        left_layout.addLayout(cert_row)
 
         self.key_file_input = QLineEdit()
         self.key_file_input.setText(self.key_file)
@@ -401,43 +416,104 @@ class FTPGuiApp(QWidget):
         key_row = QHBoxLayout()
         key_row.addWidget(self.key_file_input)
         key_row.addWidget(self.key_browse_btn)
-        layout.addLayout(key_row)
+        left_layout.addLayout(key_row)
 
         self.cn_input = QLineEdit()
         self.cn_input.setPlaceholderText("Common Name (e.g. hostname or IP)")
         self.cn_input.setText(self.cert_common_name)
         cn_form = QFormLayout()
         cn_form.addRow("Certificate CN:", self.cn_input)
-        layout.addLayout(cn_form)
+        left_layout.addLayout(cn_form)
 
         self.btn_gen_cert = QPushButton("Generate Self-Signed FTPS Certificate")
         self.btn_gen_cert.clicked.connect(self.on_generate_cert)
-        layout.addWidget(self.btn_gen_cert)
+        left_layout.addWidget(self.btn_gen_cert)
 
         self.btn_show_cert = QPushButton("Show Certificate Info / Verify")
         self.btn_show_cert.clicked.connect(self.on_show_cert_info)
-        layout.addWidget(self.btn_show_cert)
+        left_layout.addWidget(self.btn_show_cert)
 
-        self.start_button = QPushButton("Start FTP Server")
-        self.start_button.clicked.connect(self.start_server)
-        self.stop_button = QPushButton("Stop FTP Server")
-        self.stop_button.clicked.connect(self.stop_server)
-        self.stop_button.setEnabled(False)
+        left_layout.addStretch(1)
+        self.setup_tray_icon()
 
-        button_layout = QHBoxLayout()
-        button_layout.addWidget(self.start_button)
-        button_layout.addWidget(self.stop_button)
-        layout.addLayout(button_layout)
+        # ===== Right panel =====
+        right_layout = QVBoxLayout(right_panel)
+
+        self.ip_label = QLabel("Listening on:")
+        right_layout.addWidget(self.ip_label)
+
+        self.filter_input = QLineEdit()
+        self.filter_input.setPlaceholderText("Filter logs (case-insensitive)...")
+        self.filter_input.textChanged.connect(self.apply_log_filter)
+        right_layout.addWidget(self.filter_input)
 
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        layout.addWidget(self.log_view)
+        self.log_view.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.log_view.setPlaceholderText("Server logs will appear here...")
+        self.log_view.setStyleSheet("QTextEdit { font-family: Consolas, 'Courier New', monospace; }")
+        self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_layout.addWidget(self.log_view, 1)
 
-        self.ip_label = QLabel("Listening on:")
-        layout.addWidget(self.ip_label)
+        footer = QFrame()
+        footer.setFrameShape(QFrame.NoFrame)
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 6, 0, 0)
 
-        self.setLayout(layout)
-        self.setup_tray_icon()
+        self.start_button = QPushButton("Start FTP Server")
+        self.stop_button = QPushButton("Stop FTP Server")
+        self.stop_button.setEnabled(False)
+
+        self.start_button.setStyleSheet("""
+        QPushButton {
+            background: #2ecc71;
+            color: white;
+            font-weight: 600;
+            padding: 8px 14px;
+            border-radius: 6px;
+        }
+        QPushButton:hover:enabled {
+            filter: brightness(1.05);
+        }
+        QPushButton:disabled {
+            background: #555555;
+            color: #aaaaaa;
+            border: 1px solid #444;
+        }
+        """)
+
+        self.stop_button.setStyleSheet("""
+        QPushButton {
+            background: #e74c3c;
+            color: white;
+            font-weight: 600;
+            padding: 8px 14px;
+            border-radius: 6px;
+        }
+        QPushButton:hover:enabled {
+            filter: brightness(1.05);
+        }
+        QPushButton:disabled {
+            background: #555555;
+            color: #aaaaaa;
+            border: 1px solid #444;
+        }
+        """)
+
+        self.start_button.clicked.connect(self.start_server)
+        self.stop_button.clicked.connect(self.stop_server)
+
+        footer_layout.addStretch(1)
+        footer_layout.addWidget(self.start_button)
+        footer_layout.addWidget(self.stop_button)
+
+        right_layout.addWidget(footer, 0)
+
+        # ===== End LR =====
+        root = QVBoxLayout(self)
+        root.addWidget(splitter)
+        self.setLayout(root)
 
     def eventFilter(self, obj, event):
         if obj == self.password_input:
@@ -549,7 +625,6 @@ class FTPGuiApp(QWidget):
         bind_host = self.bind_host_input.text().strip() or "auto"
         read_only = self.read_only_checkbox.isChecked()
 
-        # FTPS
         ftps_enabled = self.ftps_enable_checkbox.isChecked()
         tls_require_ctrl = self.tls_ctrl_checkbox.isChecked()
         tls_require_data = self.tls_data_checkbox.isChecked()
@@ -616,9 +691,29 @@ class FTPGuiApp(QWidget):
 
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
+        self.ip_label.setText(f"Listening on: ")
 
     def log_message(self, message):
-        self.log_view.append(message)
+        self.log_buffer.append(message)
+        self.apply_log_filter()
+
+    def apply_log_filter(self):
+        text = self.filter_input.text().strip().lower() if hasattr(self, 'filter_input') else ""
+        scroll_bar = self.log_view.verticalScrollBar()
+        was_at_bottom = scroll_bar.value() == scroll_bar.maximum()
+
+        if not text:
+            display = "\n".join(self.log_buffer)
+        else:
+            display = "\n".join(m for m in self.log_buffer if text in m.lower())
+
+        self.log_view.setPlainText(display)
+
+        if was_at_bottom:
+            cursor = self.log_view.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            self.log_view.setTextCursor(cursor)
+            self.log_view.ensureCursorVisible()
 
     def update_ip_addresses(self):
         ip_addresses = self.get_ip_addresses()
@@ -737,16 +832,18 @@ def read_cert_info(cert_path):
     }
 
 
-
 def dark_title_bar(hwnd, use_dark_mode=False):
     DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-    set_window_attribute = ct.windll.dwmapi.DwmSetWindowAttribute
-    rendering_policy = DWMWA_USE_IMMERSIVE_DARK_MODE
-    value = 1 if use_dark_mode else 0
-    value = ct.c_int(value)
-    result = set_window_attribute(hwnd, rendering_policy, ct.byref(value), ct.sizeof(value))
-    if result != 0:
-        print(f"Failed to set dark mode: {result}")
+    try:
+        set_window_attribute = ct.windll.dwmapi.DwmSetWindowAttribute
+        rendering_policy = DWMWA_USE_IMMERSIVE_DARK_MODE
+        value = 1 if use_dark_mode else 0
+        value = ct.c_int(value)
+        result = set_window_attribute(hwnd, rendering_policy, ct.byref(value), ct.sizeof(value))
+        if result != 0:
+            print(f"Failed to set dark mode: {result}")
+    except Exception:
+        pass
 
 
 if __name__ == '__main__':
@@ -759,8 +856,11 @@ if __name__ == '__main__':
 
     if not config.getboolean('FTP', 'run_as_daemon'):
         gui.show()
-        winId = gui.winId()
-        dark_title_bar(winId, use_dark_mode=darkdetect.isDark())
+        try:
+            winId = gui.winId()
+            dark_title_bar(winId, use_dark_mode=darkdetect.isDark())
+        except Exception:
+            pass
         gui.adjust_window_size(1, 1)
 
     sys.exit(app.exec())
