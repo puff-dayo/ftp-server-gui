@@ -6,7 +6,7 @@
 
 The [original repository](https://github.com/ghostersk/ftp-server-gui) is forked here with the intention of updating it to use the newer PySide6, making some improvements and adding new features. Additionally, [this project](https://github.com/puff-dayo/ftp-server-gui) has abandoned support for Linux and has not undergone security testing. Please do not expose it to any public network.
 
-<img width="800" height="auto" alt="" src="https://github.com/user-attachments/assets/6cb4e5bf-9bdc-4af1-97c7-9fd8779b5dae" />
+<img width="800" height="auto" alt="" src="https://github.com/user-attachments/assets/48fa7b4a-fe45-4a6b-b0e0-e50e35e64353" />
 
 Download a compiled binary from [Release](https://github.com/puff-dayo/ftp-server-gui/releases).
 
