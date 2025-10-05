@@ -1,6 +1,6 @@
 [project]
 name = "ftp-server-gui"
-version = "0.1.0"
+version = "1.1.0"
 description = "Simple FTP server with GUI with python - with windows exe"
 requires-python = ">=3.12"
 dependencies = [
