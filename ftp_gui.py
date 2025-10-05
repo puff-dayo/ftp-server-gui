@@ -11,8 +11,8 @@ import sys
 
 import darkdetect
 import qdarktheme
-from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QIcon, QAction, QTextCursor
+from PySide6.QtCore import QThread, Signal, Qt, QTimer
+from PySide6.QtGui import QIcon, QAction, QTextCursor, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
@@ -343,7 +343,6 @@ class FTPGuiApp(QWidget):
         form_layout.addRow("Port:", self.port_input)
         left_layout.addLayout(form_layout)
 
-        # FTP directory
         self.directory_input = QLineEdit()
         self.directory_input.setText(self.ftp_directory)
         self.directory_button = QPushButton("Browse FTP Folder")
@@ -353,7 +352,6 @@ class FTPGuiApp(QWidget):
         directory_layout.addWidget(self.directory_button)
         left_layout.addLayout(directory_layout)
 
-        # Log file
         self.log_file_input = QLineEdit()
         self.log_file_input.setText(self.log_file)
         self.log_file_button = QPushButton("Browse Log File")
@@ -363,7 +361,6 @@ class FTPGuiApp(QWidget):
         log_layout.addWidget(self.log_file_button)
         left_layout.addLayout(log_layout)
 
-        # Options..
         self.daemon_checkbox = QCheckBox("Minimize to Tray after closing")
         self.daemon_checkbox.setChecked(self.run_as_daemon)
         left_layout.addWidget(self.daemon_checkbox)
@@ -444,6 +441,7 @@ class FTPGuiApp(QWidget):
 
         self.filter_input = QLineEdit()
         self.filter_input.setPlaceholderText("Filter logs (case-insensitive)...")
+        self.filter_input.setClearButtonEnabled(True)
         self.filter_input.textChanged.connect(self.apply_log_filter)
         right_layout.addWidget(self.filter_input)
 
@@ -454,6 +452,27 @@ class FTPGuiApp(QWidget):
         self.log_view.setStyleSheet("QTextEdit { font-family: Consolas, 'Courier New', monospace; }")
         self.log_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.log_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.log_view.setContextMenuPolicy(Qt.ActionsContextMenu)
+        act_copy = QAction("Copy", self)
+        act_copy.setShortcut(QKeySequence.Copy)
+        act_copy.triggered.connect(self.log_view.copy)
+        act_copy_all = QAction("Copy all", self)
+        act_copy_all.setShortcut(QKeySequence(Qt.CTRL | Qt.SHIFT | Qt.Key_C))
+        act_copy_all.triggered.connect(lambda: QApplication.clipboard().setText(self.log_view.toPlainText()))
+        act_select_all = QAction("Select all", self)
+        act_select_all.setShortcut(QKeySequence.SelectAll)
+        act_select_all.triggered.connect(self.log_view.selectAll)
+        act_clear = QAction("Clear all", self)
+        act_clear.triggered.connect(self.clear_display_logs)
+        sep1 = QAction(self)
+        sep1.setSeparator(True)
+        sep2 = QAction(self)
+        sep2.setSeparator(True)
+        self.log_view.addAction(act_copy)
+        self.log_view.addAction(act_copy_all)
+        self.log_view.addAction(act_select_all)
+        self.log_view.addAction(sep1)
+        self.log_view.addAction(act_clear)
         right_layout.addWidget(self.log_view, 1)
 
         footer = QFrame()
@@ -693,27 +712,41 @@ class FTPGuiApp(QWidget):
         self.stop_button.setEnabled(False)
         self.ip_label.setText(f"Listening on: ")
 
+    def clear_display_logs(self):
+        self.log_view.clear()
+        self.log_buffer.clear()
+        self.filter_input.clear()
+
     def log_message(self, message):
         self.log_buffer.append(message)
-        self.apply_log_filter()
+
+        if not self.filter_input.text().strip():
+            bar = self.log_view.verticalScrollBar()
+            at_bottom = bar.value() == bar.maximum()
+
+            self.log_view.moveCursor(QTextCursor.End)
+            if self.log_view.toPlainText():
+                self.log_view.insertPlainText("\n")
+            self.log_view.insertPlainText(message)
+
+            if at_bottom:
+                bar.setValue(bar.maximum())
+        else:
+            self.apply_log_filter()
 
     def apply_log_filter(self):
-        text = self.filter_input.text().strip().lower() if hasattr(self, 'filter_input') else ""
-        scroll_bar = self.log_view.verticalScrollBar()
-        was_at_bottom = scroll_bar.value() == scroll_bar.maximum()
-
+        text = self.filter_input.text().strip().lower()
         if not text:
-            display = "\n".join(self.log_buffer)
-        else:
-            display = "\n".join(m for m in self.log_buffer if text in m.lower())
+            return
 
+        bar = self.log_view.verticalScrollBar()
+        at_bottom = bar.value() == bar.maximum()
+
+        display = "\n".join(m for m in self.log_buffer if text in m.lower())
         self.log_view.setPlainText(display)
 
-        if was_at_bottom:
-            cursor = self.log_view.textCursor()
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            self.log_view.setTextCursor(cursor)
-            self.log_view.ensureCursorVisible()
+        if at_bottom:
+            QTimer.singleShot(0, lambda: bar.setValue(bar.maximum()))
 
     def update_ip_addresses(self):
         ip_addresses = self.get_ip_addresses()
