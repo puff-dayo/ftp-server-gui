@@ -1,5 +1,6 @@
 import configparser
 import ctypes as ct
+import datetime
 import ipaddress
 import logging
 import os
@@ -15,12 +16,15 @@ from PySide6.QtGui import QIcon, QAction
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton,
                                QVBoxLayout, QHBoxLayout, QLineEdit, QTextEdit,
                                QFormLayout, QSpinBox, QFileDialog, QSystemTrayIcon, QMenu, QCheckBox)
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from pyftpdlib.authorizers import DummyAuthorizer
-from pyftpdlib.handlers import FTPHandler
+from pyftpdlib.handlers import FTPHandler, TLS_FTPHandler
 from pyftpdlib.servers import FTPServer
 
-# EXE_PATH = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(
-#     os.path.abspath(__file__))
 EXE_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
 TEMP_PATH = os.path.dirname(os.path.abspath(__file__))
 
@@ -157,7 +161,9 @@ class FTPServerThread(QThread):
 
     def __init__(self, port, username, password, ftp_directory, log_file,
                  allow_lan_only=False, allowed_nets_text="auto",
-                 bind_host="auto", read_only=True, parent=None):
+                 bind_host="auto", read_only=True, parent=None,
+                 ftps_enabled=False, cert_file="", key_file="",
+                 tls_require_ctrl=True, tls_require_data=True):
         super(FTPServerThread, self).__init__(parent)
         self.port = port
         self.username = username
@@ -168,9 +174,17 @@ class FTPServerThread(QThread):
         self.allowed_nets_text = (allowed_nets_text or "").strip()
         self.bind_host = bind_host
         self.read_only = read_only
+
+        self.ftps_enabled = ftps_enabled
+        self.cert_file = cert_file
+        self.key_file = key_file
+        self.tls_require_ctrl = tls_require_ctrl
+        self.tls_require_data = tls_require_data
+
         self.server = None
         self.running = False
         self.setup_logger()
+
 
     def setup_logger(self):
         self.logger = logging.getLogger("FTPServer")
@@ -218,7 +232,21 @@ class FTPServerThread(QThread):
         authorizer = DummyAuthorizer()
         authorizer.add_user(self.username, self.password, self.ftp_directory, perm=perms)
 
-        handler = LANFilteredFTPHandler
+        if self.ftps_enabled:
+            handler = type("LANFilteredTLSHandler", (LANFilteredFTPHandler, TLS_FTPHandler), {})
+            handler.certfile = self.cert_file
+            handler.keyfile = self.key_file
+            if self.tls_require_ctrl:
+                handler.tls_control_required = True
+            if self.tls_require_data:
+                handler.tls_data_required = True
+            self.log("FTPS: ENABLED")
+            self.log(f"  cert: {self.cert_file}")
+            self.log(f"  key : {self.key_file}")
+        else:
+            handler = LANFilteredFTPHandler
+            self.log("FTPS: DISABLED")
+
         handler.authorizer = authorizer
         handler.log = self.log
         self.log(f"Read-only mode: {'ON' if self.read_only else 'OFF'}")
@@ -237,6 +265,7 @@ class FTPServerThread(QThread):
         handler.max_login_attempts = 3
         self.running = True
         self.server.serve_forever()
+
 
     def log(self, message, logfun=None):
         self.log_signal.emit(message)
@@ -263,6 +292,12 @@ class FTPGuiApp(QWidget):
         self.allowed_nets = config['FTP'].get('allowed_nets', 'auto')
         self.bind_host = config['FTP'].get('bind_host', 'auto')
         self.read_only = config['FTP'].getboolean('read_only', True)
+        self.ftps_enabled = config['FTP'].getboolean('ftps_enabled', False)
+        self.tls_require_ctrl = config['FTP'].getboolean('tls_require_ctrl', True)
+        self.tls_require_data = config['FTP'].getboolean('tls_require_data', True)
+        self.cert_file = config['FTP'].get('cert_file', os.path.join(EXE_PATH, 'ftpd.crt'))
+        self.key_file = config['FTP'].get('key_file', os.path.join(EXE_PATH, 'ftpd.key'))
+        self.cert_common_name = config['FTP'].get('cert_common_name', 'localhost')
 
         self.tray_icon = None
         self.init_ui()
@@ -337,6 +372,52 @@ class FTPGuiApp(QWidget):
         self.bind_host_input.setText(self.bind_host)
         form_layout2.addRow("Bind host:", self.bind_host_input)
 
+        # --- FTPS 区域 ---
+        self.ftps_enable_checkbox = QCheckBox("Enable FTPS (TLS)")
+        self.ftps_enable_checkbox.setChecked(self.ftps_enabled)
+        layout.addWidget(self.ftps_enable_checkbox)
+
+        self.tls_ctrl_checkbox = QCheckBox("Require TLS for control channel")
+        self.tls_ctrl_checkbox.setChecked(self.tls_require_ctrl)
+        layout.addWidget(self.tls_ctrl_checkbox)
+
+        self.tls_data_checkbox = QCheckBox("Require TLS for data channel")
+        self.tls_data_checkbox.setChecked(self.tls_require_data)
+        layout.addWidget(self.tls_data_checkbox)
+
+        self.cert_file_input = QLineEdit()
+        self.cert_file_input.setText(self.cert_file)
+        self.cert_browse_btn = QPushButton("Browse Cert (.crt/.pem)")
+        self.cert_browse_btn.clicked.connect(self.browse_cert)
+        cert_row = QHBoxLayout()
+        cert_row.addWidget(self.cert_file_input)
+        cert_row.addWidget(self.cert_browse_btn)
+        layout.addLayout(cert_row)
+
+        self.key_file_input = QLineEdit()
+        self.key_file_input.setText(self.key_file)
+        self.key_browse_btn = QPushButton("Browse Key (.key)")
+        self.key_browse_btn.clicked.connect(self.browse_key)
+        key_row = QHBoxLayout()
+        key_row.addWidget(self.key_file_input)
+        key_row.addWidget(self.key_browse_btn)
+        layout.addLayout(key_row)
+
+        self.cn_input = QLineEdit()
+        self.cn_input.setPlaceholderText("Common Name (e.g. hostname or IP)")
+        self.cn_input.setText(self.cert_common_name)
+        cn_form = QFormLayout()
+        cn_form.addRow("Certificate CN:", self.cn_input)
+        layout.addLayout(cn_form)
+
+        self.btn_gen_cert = QPushButton("Generate Self-Signed FTPS Certificate")
+        self.btn_gen_cert.clicked.connect(self.on_generate_cert)
+        layout.addWidget(self.btn_gen_cert)
+
+        self.btn_show_cert = QPushButton("Show Certificate Info / Verify")
+        self.btn_show_cert.clicked.connect(self.on_show_cert_info)
+        layout.addWidget(self.btn_show_cert)
+
         self.start_button = QPushButton("Start FTP Server")
         self.start_button.clicked.connect(self.start_server)
         self.stop_button = QPushButton("Stop FTP Server")
@@ -409,6 +490,54 @@ class FTPGuiApp(QWidget):
             self.log_file = log_file
             self.log_file_input.setText(log_file)
 
+    def browse_cert(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Certificate", self.cert_file_input.text(),
+                                              "Certificate Files (*.crt *.pem *.cer);;All Files (*)")
+        if path:
+            self.cert_file_input.setText(path)
+
+    def browse_key(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select Private Key", self.key_file_input.text(),
+                                              "Key Files (*.key *.pem);;All Files (*)")
+        if path:
+            self.key_file_input.setText(path)
+
+    def on_generate_cert(self):
+        cert_path = self.cert_file_input.text().strip() or os.path.join(EXE_PATH, "ftpd.crt")
+        key_path = self.key_file_input.text().strip() or os.path.join(EXE_PATH, "ftpd.key")
+        cn = self.cn_input.text().strip() or "localhost"
+        try:
+            os.makedirs(os.path.dirname(cert_path), exist_ok=True)
+            os.makedirs(os.path.dirname(key_path), exist_ok=True)
+        except Exception:
+            pass
+        try:
+            generate_self_signed_cert(cert_path, key_path, common_name=cn, days_valid=3650)
+            self.log_message(f"Generated self-signed certificate:\n  cert: {cert_path}\n  key : {key_path}\n  CN  : {cn}")
+            self.cert_file_input.setText(cert_path)
+            self.key_file_input.setText(key_path)
+            self.ftps_enable_checkbox.setChecked(True)
+            self.on_show_cert_info()
+        except Exception as e:
+            self.log_message(f"ERROR generating certificate: {e}")
+
+    def on_show_cert_info(self):
+        cert_path = self.cert_file_input.text().strip()
+        if not os.path.exists(cert_path):
+            self.log_message(f"Certificate not found: {cert_path}")
+            return
+        try:
+            info = read_cert_info(cert_path)
+            self.log_message(
+                "Certificate info:\n"
+                f"  Subject : {info['subject']}\n"
+                f"  Issuer  : {info['issuer']}\n"
+                f"  Valid   : {info['not_before']}  ~  {info['not_after']}\n"
+                f"  SHA256  : {info['sha256_fingerprint']}"
+            )
+        except Exception as e:
+            self.log_message(f"ERROR reading certificate: {e}")
+
     def start_server(self):
         username = self.username_input.text()
         password = self.password_input.text()
@@ -420,12 +549,35 @@ class FTPGuiApp(QWidget):
         bind_host = self.bind_host_input.text().strip() or "auto"
         read_only = self.read_only_checkbox.isChecked()
 
+        # FTPS
+        ftps_enabled = self.ftps_enable_checkbox.isChecked()
+        tls_require_ctrl = self.tls_ctrl_checkbox.isChecked()
+        tls_require_data = self.tls_data_checkbox.isChecked()
+        cert_file = self.cert_file_input.text().strip()
+        key_file = self.key_file_input.text().strip()
+        cert_common_name = self.cn_input.text().strip() or "localhost"
+
+        if ftps_enabled:
+            missing = []
+            if not cert_file or not os.path.exists(cert_file):
+                missing.append("certificate file")
+            if not key_file or not os.path.exists(key_file):
+                missing.append("private key")
+            if missing:
+                self.log_message("FTPS enabled but missing: " + ", ".join(missing))
+                return
+
         self.server_thread = FTPServerThread(
             port, username, password, ftp_directory, log_file,
             allow_lan_only=allow_lan_only,
             allowed_nets_text=allowed_nets_text,
             bind_host=bind_host,
-            read_only=read_only
+            read_only=read_only,
+            ftps_enabled=ftps_enabled,
+            cert_file=cert_file,
+            key_file=key_file,
+            tls_require_ctrl=tls_require_ctrl,
+            tls_require_data=tls_require_data
         )
         self.server_thread.log_signal.connect(self.log_message)
         self.server_thread.start()
@@ -447,7 +599,13 @@ class FTPGuiApp(QWidget):
             'allow_lan_only': '1' if allow_lan_only else '0',
             'allowed_nets': allowed_nets_text or 'auto',
             'bind_host': bind_host or 'auto',
-            'read_only': '1' if read_only else '0'
+            'read_only': '1' if read_only else '0',
+            'ftps_enabled': '1' if ftps_enabled else '0',
+            'tls_require_ctrl': '1' if tls_require_ctrl else '0',
+            'tls_require_data': '1' if tls_require_data else '0',
+            'cert_file': cert_file or os.path.join(EXE_PATH, 'ftpd.crt'),
+            'key_file': key_file or os.path.join(EXE_PATH, 'ftpd.key'),
+            'cert_common_name': cert_common_name
         }
         save_config(config)
 
@@ -499,7 +657,13 @@ def load_config():
             'allow_lan_only': '1',
             'allowed_nets': 'auto',
             'bind_host': 'auto',
-            'read_only': '1'
+            'read_only': '1',
+            'ftps_enabled': '0',
+            'tls_require_ctrl': '1',
+            'tls_require_data': '1',
+            'cert_file': os.path.join(EXE_PATH, 'ftpd.crt'),
+            'key_file': os.path.join(EXE_PATH, 'ftpd.key'),
+            'cert_common_name': 'localhost'
         }
         with open(CONFIG_FILE, 'w') as configfile:
             config.write(configfile)
@@ -511,6 +675,67 @@ def load_config():
 def save_config(config):
     with open(CONFIG_FILE, 'w') as configfile:
         config.write(configfile)
+
+
+def generate_self_signed_cert(cert_path, key_path, common_name="localhost", days_valid=3650):
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048, backend=default_backend())
+
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, common_name),
+    ])
+
+    now = datetime.datetime.utcnow()
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(minutes=1))
+        .not_valid_after(now + datetime.timedelta(days=days_valid))
+        .add_extension(
+            x509.SubjectAlternativeName([x509.DNSName(common_name)]),
+            critical=False,
+        )
+        .sign(key, hashes.SHA256(), default_backend())
+    )
+
+    with open(key_path, "wb") as f:
+        f.write(
+            key.private_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PrivateFormat.TraditionalOpenSSL,
+                encryption_algorithm=serialization.NoEncryption()
+            )
+        )
+
+    with open(cert_path, "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+
+    return cert_path, key_path
+
+
+def read_cert_info(cert_path):
+    with open(cert_path, "rb") as f:
+        data = f.read()
+    cert = x509.load_pem_x509_certificate(data, default_backend())
+
+    subject = cert.subject.rfc4514_string()
+    issuer = cert.issuer.rfc4514_string()
+    not_before = cert.not_valid_before
+    not_after = cert.not_valid_after
+
+    fp = cert.fingerprint(hashes.SHA256()).hex().upper()
+    fingerprint = ":".join(fp[i:i+2] for i in range(0, len(fp), 2))
+
+    return {
+        "subject": subject,
+        "issuer": issuer,
+        "not_before": not_before,
+        "not_after": not_after,
+        "sha256_fingerprint": fingerprint
+    }
+
 
 
 def dark_title_bar(hwnd, use_dark_mode=False):
