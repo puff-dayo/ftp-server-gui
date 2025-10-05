@@ -8,7 +8,7 @@ dependencies = [
     "imageio>=2.37.0",
     "nuitka==2.7.14",
     "pillow>=11.1.0",
-    "pyftpdlib>=2.0.1",
+    "pyftpdlib==2.1.0",
     "pyinstaller>=6.11.1",
     "pyopenssl>=25.3.0",
     "pyqtdarktheme-fork>=2.3.4",
