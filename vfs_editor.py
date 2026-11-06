@@ -73,7 +73,8 @@ class VirtualMappingDialog(QDialog):
         self.accept()
 
     def mapping(self):
-        return VirtualMapping(normalize_virtual_path(self.virtual_input.text()), os.path.abspath(self.local_input.text()))
+        return VirtualMapping(normalize_virtual_path(self.virtual_input.text()),
+                              os.path.abspath(self.local_input.text()))
 
 
 class VirtualDirectoryEditor(QWidget):
@@ -157,7 +158,8 @@ class VirtualDirectoryEditor(QWidget):
         root.setExpanded(True)
         self.tree.expandAll()
         count = len(self._mappings)
-        self.summary.setText(f"{count} mapped folder{'s' if count != 1 else ''}. Changes take effect the next time the server starts.")
+        self.summary.setText(
+            f"{count} mapped folder{'s' if count != 1 else ''}. Changes take effect the next time the server starts.")
         self._update_buttons()
 
     def _selected_path(self):
@@ -193,7 +195,8 @@ class VirtualDirectoryEditor(QWidget):
         if dialog.exec() != QDialog.Accepted:
             return
         replacement = dialog.mapping()
-        if any(m.virtual_path == replacement.virtual_path and m.virtual_path != mapping.virtual_path for m in self._mappings):
+        if any(m.virtual_path == replacement.virtual_path and m.virtual_path != mapping.virtual_path for m in
+               self._mappings):
             QMessageBox.warning(self, "Duplicate mapping", f"{replacement.virtual_path} is already mapped.")
             return
         self._mappings = [replacement if m == mapping else m for m in self._mappings]
@@ -220,5 +223,3 @@ class VirtualDirectoryEditor(QWidget):
         has_mapping = self._selected_mapping() is not None
         self.edit_button.setEnabled(has_mapping)
         self.remove_button.setEnabled(has_mapping)
-
-

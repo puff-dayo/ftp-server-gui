@@ -1,6 +1,6 @@
 [project]
 name = "ftp-server-gui"
-version = "1.1.0"
+version = "2.0.0"
 description = "Simple FTP server with GUI with python - with windows exe"
 requires-python = ">=3.12"
 dependencies = [
@@ -8,9 +8,8 @@ dependencies = [
     "imageio>=2.37.3",
     "nuitka>=4.3.1",
     "pillow>=13.0.0",
-    "pyftpdlib @ git+https://github.com/giampaolo/pyftpdlib.git@c2f89f968acad807d05a6e7df5f0c913b6653553",
+    "aioftp>=0.28.3",
     "pyinstaller>=6.22.0",
-    "pyopenssl>=26.4.0",
     "pyqtdarktheme-fork>=2.3.6",
     "pyside6>=6.12.0",
 ]

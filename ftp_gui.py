@@ -1,3 +1,4 @@
+import asyncio
 import configparser
 import ctypes as ct
 import datetime
@@ -25,17 +26,9 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-from pyftpdlib.authorizers import DummyAuthorizer
-from pyftpdlib.handlers import FTPHandler, TLS_FTPHandler
-from pyftpdlib.servers import FTPServer
 
-from vfs import (
-    MappedVirtualFS,
-    VirtualMapping,
-    mappings_from_json,
-    mappings_to_json,
-    normalize_mappings,
-)
+from backend import make_server
+from vfs import VirtualMapping, mappings_from_json, mappings_to_json, normalize_mappings
 from vfs_editor import VirtualDirectoryEditor
 
 EXE_PATH = os.path.dirname(os.path.abspath(sys.argv[0]))
@@ -144,37 +137,6 @@ def pick_random_port(preferred=(), low=20000, high=65535, attempts=100):
         return 33921
 
 
-class LANFilterMixin:
-    allowed_networks = None
-
-    def on_connect(self):
-        try:
-            ip = ipaddress.ip_address(self.remote_ip)
-        except ValueError:
-            if self.allowed_networks:
-                self.respond("421 Service not available, access denied.")
-                self.close()
-                return
-            return super().on_connect()
-
-        nets = getattr(self, "allowed_networks", None)
-        if nets and not any(ip in network for network in nets):
-            if hasattr(self, "log"):
-                self.log(f"Blocked connection from {ip} (not in allowed networks)")
-            self.respond("421 Service not available, access denied.")
-            self.close()
-            return
-        return super().on_connect()
-
-
-class LANFilteredFTPHandler(LANFilterMixin, FTPHandler):
-    pass
-
-
-class LANFilteredTLSHandler(LANFilterMixin, TLS_FTPHandler):
-    pass
-
-
 class FTPServerThread(QThread):
     log_signal = Signal(str)
     status_signal = Signal(bool, str)
@@ -215,6 +177,8 @@ class FTPServerThread(QThread):
         self.server = None
         self.running = False
         self.logger = None
+        self._loop = None
+        self._stop_requested = False
 
     def setup_logger(self):
         os.makedirs(os.path.dirname(os.path.abspath(self.log_file)), exist_ok=True)
@@ -263,62 +227,47 @@ class FTPServerThread(QThread):
             mappings = normalize_mappings(self.virtual_mappings, require_existing=True)
             if not mappings:
                 raise ValueError("At least one virtual directory mapping is required.")
-
             os.makedirs(VFS_NAMESPACE, exist_ok=True)
-            perms = "elr" if self.read_only else "elradfmw"
-            authorizer = DummyAuthorizer()
-            authorizer.add_user(self.username, self.password, VFS_NAMESPACE, perm=perms)
-
-            handler = LANFilteredTLSHandler if self.ftps_enabled else LANFilteredFTPHandler
-            if self.ftps_enabled:
-                handler.certfile = self.cert_file
-                handler.keyfile = self.key_file
-                handler.tls_control_required = self.tls_require_ctrl
-                handler.tls_data_required = self.tls_require_data
-                self.log("FTPS: ENABLED")
-                self.log(f"  cert: {self.cert_file}")
-                self.log(f"  key : {self.key_file}")
-            else:
-                self.log("FTPS: DISABLED")
-
-            configured_fs = type(
-                "ConfiguredMappedVirtualFS",
-                (MappedVirtualFS,),
-                {"configured_mappings": mappings},
-            )
-            handler.abstracted_fs = configured_fs
-            handler.authorizer = authorizer
-            handler.log = self.log
-            handler.max_login_attempts = 3
+            nets = self._parse_allowed_networks()
+            bind_addr = self._get_bind_addr(nets)
+            self.log(f"Backend: aioftp; FTPS: {'ON' if self.ftps_enabled else 'OFF'}")
             self.log(f"Read-only mode: {'ON' if self.read_only else 'OFF'}")
             for mapping in sorted(mappings, key=lambda m: m.virtual_path):
                 self.log(f"VFS: {mapping.virtual_path} -> {mapping.local_path}")
-
-            nets = self._parse_allowed_networks()
-            handler.allowed_networks = nets
-            bind_addr = self._get_bind_addr(nets)
-            if nets:
-                self.log(f"LAN-only filtering enabled; allowed nets = {nets}")
             self.log(f"Binding FTP server to {bind_addr}:{self.port}")
-
-            self.server = FTPServer((bind_addr, self.port), handler)
-            self.server.max_cons = 64
-            self.server.max_cons_per_ip = 5
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self.server = make_server(
+                username=self.username, password=self.password, mappings=mappings,
+                namespace=VFS_NAMESPACE, read_only=self.read_only,
+                ftps_enabled=self.ftps_enabled, cert_file=self.cert_file,
+                key_file=self.key_file, tls_require_ctrl=self.tls_require_ctrl,
+                tls_require_data=self.tls_require_data, allowed_networks=nets,
+                log_callback=self.log,
+            )
+            self._loop.run_until_complete(self.server.start(bind_addr, self.port))
             self.running = True
             self.status_signal.emit(True, f"{bind_addr}:{self.port}")
-            self.server.serve_forever()
+            if not self._stop_requested:
+                self._loop.run_forever()
         except Exception as exc:
             self.log(f"ERROR: {exc}")
             self.status_signal.emit(False, str(exc))
         finally:
             self.running = False
+            if getattr(self, "_loop", None):
+                if self.server and getattr(self.server, "server", None):
+                    try:
+                        self._loop.run_until_complete(self.server.close())
+                    except Exception as exc:
+                        self.log(f"Shutdown error: {exc}")
+                self._loop.close()
+                self._loop = None
             self.server = None
             if self.logger:
-                for file_handler in list(self.logger.handlers):
-                    try:
-                        file_handler.close()
-                    finally:
-                        self.logger.removeHandler(file_handler)
+                for handler in list(self.logger.handlers):
+                    handler.close()
+                    self.logger.removeHandler(handler)
 
     def log(self, message, logfun=None):
         self.log_signal.emit(str(message))
@@ -326,8 +275,10 @@ class FTPServerThread(QThread):
             self.logger.info(str(message))
 
     def stop(self):
-        if self.server:
-            self.server.close_all()
+        self._stop_requested = True
+        loop = getattr(self, "_loop", None)
+        if loop is not None and loop.is_running():
+            loop.call_soon_threadsafe(loop.stop)
         self.running = False
 
 
@@ -431,19 +382,19 @@ class FTPGuiApp(QWidget):
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
         self.save_button.setStyleSheet(
-            "QPushButton { background: #ebc700; color: white; font-weight: 600; padding: 7px 13px; border-radius: 0px; }"
+            "QPushButton { background: #ebc700; color: white; font-weight: 600; padding: 7px 13px; border-radius: 4px; }"
             "QPushButton:hover { background: #f4d83c; }"
             "QPushButton:pressed { background: #d6b500; }"
             "QPushButton:disabled { background: #666; color: #bbb; }"
         )
         self.start_button.setStyleSheet(
-            "QPushButton { background: #369650; color: white; font-weight: 600; padding: 7px 13px; border-radius: 0px; }"
+            "QPushButton { background: #369650; color: white; font-weight: 600; padding: 7px 13px; border-radius: 4px; }"
             "QPushButton:hover { background: #39b967; }"
             "QPushButton:pressed { background: #247d46; }"
             "QPushButton:disabled { background: #666; color: #bbb; }"
         )
         self.stop_button.setStyleSheet(
-            "QPushButton { background: #e55765; color: white; font-weight: 600; padding: 7px 13px; border-radius: 0px; }"
+            "QPushButton { background: #e55765; color: white; font-weight: 600; padding: 7px 13px; border-radius: 4px; }"
             "QPushButton:hover { background: #e15c55; }"
             "QPushButton:pressed { background: #a93d38; }"
             "QPushButton:disabled { background: #666; color: #bbb; }"
