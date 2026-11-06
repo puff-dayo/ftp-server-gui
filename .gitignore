@@ -6,3 +6,4 @@
 /.idea/
 /ftpd.crt
 /ftpd.key
+/__pycache__
